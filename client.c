@@ -8,7 +8,17 @@
 #define MULTICAST_PORT 12345
 #define BUF_SIZE 256
 
-// Funkcja odbiera wiadomości z serwera (dla multicast)
+// Funkcja rysująca planszę
+void print_board(const char *data) {
+    printf("\nCurrent board:\n");
+    printf(" %c | %c | %c \n", data[0], data[1], data[2]);
+    printf("-----------\n");
+    printf(" %c | %c | %c \n", data[3], data[4], data[5]);
+    printf("-----------\n");
+    printf(" %c | %c | %c \n\n", data[6], data[7], data[8]);
+}
+
+// Funkcja odbierająca wiadomości z serwera (multicast)
 void receive_messages(int sockfd) {
     struct sockaddr_in src_addr;
     socklen_t addr_len = sizeof(src_addr);
@@ -19,6 +29,18 @@ void receive_messages(int sockfd) {
         if (n > 0) {
             buffer[n] = '\0';
             printf("[Server] %s\n", buffer);
+
+            // Sprawdź, czy wiadomość to BOARD i wypisz planszę
+            if (strncmp(buffer, "BOARD", 5) == 0) {
+                char board_data[10];
+                int len = strlen(buffer);
+                if (len >= 9) {
+                    // Zakładamy, że plansza jest ostatnimi 9 znakami
+                    strncpy(board_data, buffer + len - 9, 9);
+                    board_data[9] = '\0';
+                    print_board(board_data);
+                }
+            }
         }
     }
 }
@@ -30,13 +52,20 @@ int main() {
     char buffer[BUF_SIZE];
     char name[32];
 
-    // Gniazdo UDP
+    // Utworzenie gniazda UDP
     if ((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) < 0) {
         perror("socket creation failed");
         exit(EXIT_FAILURE);
     }
 
-    // Ustawienie adresu klienta (dla multicast)
+    // Ustawienie SO_REUSEADDR by móc używać portu wielokrotnie
+    int reuse = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, (char *)&reuse, sizeof(reuse)) < 0) {
+        perror("setsockopt SO_REUSEADDR failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Ustawienie adresu klienta (dla odbioru multicastu)
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -58,8 +87,9 @@ int main() {
     // Pobierz nazwę gracza
     printf("Enter your player name: ");
     fgets(name, sizeof(name), stdin);
-    name[strcspn(name, "\n")] = 0;
-    // Wysyłanir do serwera informację o graczu (ADD_PLAYER)
+    name[strcspn(name, "\n")] = 0; // usuń znak nowej linii
+
+    // Wyślij do serwera informację o graczu (komenda ADD_PLAYER)
     snprintf(buffer, sizeof(buffer), "ADD_PLAYER %s", name);
     struct sockaddr_in mcast_addr;
     memset(&mcast_addr, 0, sizeof(mcast_addr));
@@ -69,12 +99,13 @@ int main() {
 
     sendto(sockfd, buffer, strlen(buffer), 0, (struct sockaddr *)&mcast_addr, sizeof(mcast_addr));
 
-    // Proces potomny do odbioru wiadomości
+    // Uruchom proces potomny do odbioru wiadomości
     if (fork() == 0) {
         receive_messages(sockfd);
         exit(0);
     }
 
+    // Pętla komend użytkownika
     while (1) {
         printf("\nAvailable commands:\n");
         printf("1. Challenge a player: CHALLENGE <name>\n");
@@ -82,15 +113,15 @@ int main() {
         printf("3. Exit the game: EXIT\n> ");
 
         fgets(buffer, sizeof(buffer), stdin);
-        buffer[strcspn(buffer, "\n")] = 0;
+        buffer[strcspn(buffer, "\n")] = 0; // usuń znak nowej linii
 
         if (strncmp(buffer, "CHALLENGE ", 10) == 0) {
-            // CHALLENGE <nazwa_przeciwnika>
+            // CHALLENGE <opponent_name>
             char cmd[BUF_SIZE];
             snprintf(cmd, sizeof(cmd), "CHALLENGE %s %s", name, buffer + 10);
             sendto(sockfd, cmd, strlen(cmd), 0, (struct sockaddr *)&mcast_addr, sizeof(mcast_addr));
         } else if (strncmp(buffer, "MOVE ", 5) == 0) {
-            // MOVE <wiersz> <kolumna>
+            // MOVE <row> <column>
             int row, col;
             if (sscanf(buffer + 5, "%d %d", &row, &col) == 2) {
                 char cmd[BUF_SIZE];
