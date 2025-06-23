@@ -3,6 +3,12 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <syslog.h>
+#include <errno.h>
+#include <signal.h>
+#include <fcntl.h>
+
+#define MAXFD 64
 
 #define MULTICAST_GROUP "239.0.0.1"
 #define MULTICAST_PORT 12345
@@ -196,6 +202,45 @@ void handle_game_result(int sockfd, struct sockaddr_in *client_addr, const char 
     save_scores();
 }
 
+int
+daemon_init(const char *pname, int facility, uid_t uid, int socket)
+{
+	int		i, p;
+	pid_t	pid;
+
+	if ( (pid = fork()) < 0)
+		return (-1);
+	else if (pid)
+		exit(0);
+
+	if (setsid() < 0)
+		return (-1);
+
+	signal(SIGHUP, SIG_IGN);
+	if ( (pid = fork()) < 0)
+		return (-1);
+	else if (pid)
+		exit(0);
+
+	chdir("/tmp");
+
+	for (i = 0; i < MAXFD; i++){
+		if(socket != i )
+			close(i);
+	}
+
+	p= open("/dev/null", O_RDONLY);
+	open("/dev/null", O_RDWR);
+	open("/dev/null", O_RDWR);
+
+	openlog(pname, LOG_PID, facility);
+	
+    syslog(LOG_ERR," STDIN =   %i\n", p);
+	setuid(uid);
+	
+	return (0);
+}
+
 int main() {
     int sockfd;
     struct sockaddr_in server_addr, mcast_addr, client_addr;
@@ -207,6 +252,9 @@ int main() {
         perror("socket creation failed");
         exit(EXIT_FAILURE);
     }
+
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0)
+        perror("setsockopt failed");
 
     // Ustawienie adresu serwera (bind na porcie multicastowym)
     memset(&server_addr, 0, sizeof(server_addr));
