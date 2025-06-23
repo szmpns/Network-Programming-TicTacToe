@@ -102,7 +102,7 @@ int is_draw(char board[3][3]) {
 }
 
 // Obsłuż ruch gracza
-void handle_move(int sockfd, int player_idx, int row, int col) {
+void handle_move(int sockfd, int player_idx, int row, int col, struct sockaddr_in *mcast_addr) {
     int game_idx = players[player_idx].in_game;
     if (game_idx == -1) return;
     Game *g = &games[game_idx];
@@ -112,57 +112,47 @@ void handle_move(int sockfd, int player_idx, int row, int col) {
     if (g->board[row][col] != ' ') return;
 
     g->board[row][col] = players[player_idx].symbol;
-    // Sprawdź zwycięstwo
     char winner = check_winner(g->board);
     int draw = is_draw(g->board);
 
     int other_idx = (g->player1 == player_idx) ? g->player2 : g->player1;
-    struct sockaddr_in *addr1 = &players[g->player1].addr;
-    struct sockaddr_in *addr2 = &players[g->player2].addr;
 
     char msg[BUF_SIZE];
     if (winner) {
-        snprintf(msg, sizeof(msg), "GAME_OVER %c", winner);
-        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)addr1, sizeof(*addr1));
-        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)addr2, sizeof(*addr2));
+        snprintf(msg, sizeof(msg), "GAME_OVER %s %s %c", players[g->player1].name, players[g->player2].name, winner);
+        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)mcast_addr, sizeof(*mcast_addr));
         if (players[g->player1].symbol == winner) players[g->player1].score++;
         else players[g->player2].score++;
         g->finished = 1;
         players[g->player1].in_game = -1;
         players[g->player2].in_game = -1;
     } else if (draw) {
-        snprintf(msg, sizeof(msg), "GAME_OVER D");
-        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)addr1, sizeof(*addr1));
-        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)addr2, sizeof(*addr2));
+        snprintf(msg, sizeof(msg), "GAME_OVER %s %s D", players[g->player1].name, players[g->player2].name);
+        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)mcast_addr, sizeof(*mcast_addr));
         g->finished = 1;
         players[g->player1].in_game = -1;
         players[g->player2].in_game = -1;
     } else {
-        // Zmień turę
         g->turn = other_idx;
-        // Wyślij aktualną planszę obu graczom
-        snprintf(msg, sizeof(msg), "BOARD %c %d%d%d%d%d%d%d%d%d",
+        snprintf(msg, sizeof(msg), "BOARD %s %s %c %c%c%c%c%c%c%c%c%c%c",
+            players[g->player1].name, players[g->player2].name,
             players[g->turn].symbol,
             g->board[0][0], g->board[0][1], g->board[0][2],
             g->board[1][0], g->board[1][1], g->board[1][2],
             g->board[2][0], g->board[2][1], g->board[2][2]);
-        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)addr1, sizeof(*addr1));
-        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)addr2, sizeof(*addr2));
+        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)mcast_addr, sizeof(*mcast_addr));
     }
 }
 
 // Obsłuż żądanie rozpoczęcia gry
-void handle_challenge(int sockfd, int challenger_idx, const char *opponent_name) {
+void handle_challenge(int sockfd, int challenger_idx, const char *opponent_name, struct sockaddr_in *mcast_addr) {
     int opponent_idx = find_player(opponent_name);
     if (opponent_idx == -1 || players[opponent_idx].in_game != -1 || players[challenger_idx].in_game != -1) return;
     int game_idx = start_game(challenger_idx, opponent_idx);
     if (game_idx == -1) return;
-    // Powiadom obu graczy o rozpoczęciu gry
     char msg[BUF_SIZE];
-    snprintf(msg, sizeof(msg), "GAME_START %s X", players[challenger_idx].name);
-    sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)&players[challenger_idx].addr, sizeof(players[challenger_idx].addr));
-    snprintf(msg, sizeof(msg), "GAME_START %s O", players[opponent_idx].name);
-    sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)&players[opponent_idx].addr, sizeof(players[opponent_idx].addr));
+    snprintf(msg, sizeof(msg), "GAME_START %s %s", players[challenger_idx].name, players[opponent_idx].name);
+    sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)mcast_addr, sizeof(*mcast_addr));
 }
 
 // Funkcja zapisująca wyniki graczy do pliku
@@ -271,13 +261,13 @@ int main() {
             char challenger[32], opponent[32];
             sscanf(buffer + 10, "%31s %31s", challenger, opponent);
             int idx = find_player(challenger);
-            if (idx != -1) handle_challenge(sockfd, idx, opponent);
+            if (idx != -1) handle_challenge(sockfd, idx, opponent, &mcast_addr);
         } else if (strncmp(buffer, "MOVE ", 5) == 0) {
             char name[32];
             int row, col;
             sscanf(buffer + 5, "%31s %d %d", name, &row, &col);
             int idx = find_player(name);
-            if (idx != -1) handle_move(sockfd, idx, row, col);
+            if (idx != -1) handle_move(sockfd, idx, row, col, &mcast_addr);
         }
         // ...obsługa innych komend...
     }
