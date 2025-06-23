@@ -172,15 +172,13 @@ void save_scores(){
 void send_player_list(int sockfd, struct sockaddr_in *mcast_addr) {
     char buffer[BUF_SIZE];
     int len = 0;
-
     for(int i = 0; i < player_count; i++) {
         len += snprintf(buffer + len, BUF_SIZE - len, "%s %d\n", players[i].name, players[i].score);
-        if (len >= BUF_SIZE - 1) {
-            break; // Zapobiega przepełnieniu bufora
-        }
+        if (len >= BUF_SIZE - 1) break;
     }
     sendto(sockfd, buffer, len, 0, (struct sockaddr *)mcast_addr, sizeof(*mcast_addr));
 }
+
 
 // Odebranie wyniku gry od klienta
 // Aktualizuje wynik gracza i zapisuje wyniki do pliku
@@ -276,15 +274,5 @@ int main() {
     return 0;
 }
 
-// Zmień send_player_list, by wysyłał do multicastu:
-void send_player_list(int sockfd, struct sockaddr_in *mcast_addr) {
-    char buffer[BUF_SIZE];
-    int len = 0;
-    for(int i = 0; i < player_count; i++) {
-        len += snprintf(buffer + len, BUF_SIZE - len, "%s %d\n", players[i].name, players[i].score);
-        if (len >= BUF_SIZE - 1) break;
-    }
-    sendto(sockfd, buffer, len, 0, (struct sockaddr *)mcast_addr, sizeof(*mcast_addr));
-}
 
-// Podobnie zmodyfikuj inne funkcje wysyłające odpowiedzi, by używały adresu multicastowego.
+
