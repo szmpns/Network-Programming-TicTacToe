@@ -4,6 +4,10 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
+//2 na multikascie tylko scors a w pentli dla danego klienta robimy konkretnie nowy soket
+//3 obsługa sygnałow
+//4 zmienic tablice playerow na sokety TCP 
+
 #define MULTICAST_GROUP "239.0.0.1"
 #define MULTICAST_PORT 12345
 #define SERVER_PORT 23456
@@ -20,10 +24,11 @@ typedef struct {
     int score;
     int in_game; // -1 jeśli nie gra, w przeciwnym razie indeks gry
     char symbol; // 'X' lub 'O'
+    int tcp_sockfd;
 } Player;
 
 typedef struct {
-    int player1; // indeks w tablicy players
+    int player1; 
     int player2;
     char board[3][3]; // plansza
     int turn; // indeks gracza, który wykonuje ruch
@@ -63,19 +68,19 @@ int find_player(const char *name) {
 }
 
 // Rozpocznij grę między dwoma graczami
-int start_game(int idx1, int idx2) {
+int start_game(int sockfd1, int sockfd2) {
     if (game_count >= MAX_GAMES) return -1;
     for (int i = 0; i < MAX_GAMES; i++) {
         if (games[i].finished || games[i].player1 == -1) {
-            games[i].player1 = idx1;
-            games[i].player2 = idx2;
+            games[i].player1 = sockfd1;
+            games[i].player2 = sockfd2;
             memset(games[i].board, ' ', sizeof(games[i].board));
-            games[i].turn = idx1;
+            games[i].turn = sockfd1;
             games[i].finished = 0;
-            players[idx1].in_game = i;
-            players[idx2].in_game = i;
-            players[idx1].symbol = 'X';
-            players[idx2].symbol = 'O';
+            players[sockfd1].in_game = i;
+            players[sockfd2].in_game = i;
+            players[sockfd1].symbol = 'X';
+            players[sockfd2].symbol = 'O';
             return i;
         }
     }
@@ -101,46 +106,40 @@ int is_draw(char board[3][3]) {
     return 1;
 }
 
-// Obsłuż ruch gracza
-void handle_move(int sockfd, int player_idx, int row, int col, struct sockaddr_in *mcast_addr) {
-    int game_idx = players[player_idx].in_game;
-    if (game_idx == -1) return;
-    Game *g = &games[game_idx];
+// Obsłuż ruch gracza przez TCP
+void handle_move_tcp(Game *g, int player_sockfd, int row, int col) {
     if (g->finished) return;
-    if (g->turn != player_idx) return;
+    if (g->turn != player_sockfd) return;
     if (row < 0 || row > 2 || col < 0 || col > 2) return;
     if (g->board[row][col] != ' ') return;
 
-    g->board[row][col] = players[player_idx].symbol;
+    char symbol = (player_sockfd == g->player1) ? 'X' : 'O';
+    g->board[row][col] = symbol;
     char winner = check_winner(g->board);
     int draw = is_draw(g->board);
 
-    int other_idx = (g->player1 == player_idx) ? g->player2 : g->player1;
+    int other_sockfd = (player_sockfd == g->player1) ? g->player2 : g->player1;
 
     char msg[BUF_SIZE];
     if (winner) {
-        snprintf(msg, sizeof(msg), "GAME_OVER %s %s %c", players[g->player1].name, players[g->player2].name, winner);
-        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)mcast_addr, sizeof(*mcast_addr));
-        if (players[g->player1].symbol == winner) players[g->player1].score++;
-        else players[g->player2].score++;
+        snprintf(msg, sizeof(msg), "GAME_OVER %c\n", winner);
+        send(g->player1, msg, strlen(msg), 0);
+        send(g->player2, msg, strlen(msg), 0);
         g->finished = 1;
-        players[g->player1].in_game = -1;
-        players[g->player2].in_game = -1;
     } else if (draw) {
-        snprintf(msg, sizeof(msg), "GAME_OVER %s %s D", players[g->player1].name, players[g->player2].name);
-        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)mcast_addr, sizeof(*mcast_addr));
+        snprintf(msg, sizeof(msg), "GAME_OVER D\n");
+        send(g->player1, msg, strlen(msg), 0);
+        send(g->player2, msg, strlen(msg), 0);
         g->finished = 1;
-        players[g->player1].in_game = -1;
-        players[g->player2].in_game = -1;
     } else {
-        g->turn = other_idx;
-        snprintf(msg, sizeof(msg), "BOARD %s %s %c %c%c%c%c%c%c%c%c%c%c",
-            players[g->player1].name, players[g->player2].name,
-            players[g->turn].symbol,
+        g->turn = other_sockfd;
+        snprintf(msg, sizeof(msg), "BOARD %c %c%c%c%c%c%c%c%c%c\n",
+            (g->turn == g->player1) ? 'X' : 'O',
             g->board[0][0], g->board[0][1], g->board[0][2],
             g->board[1][0], g->board[1][1], g->board[1][2],
             g->board[2][0], g->board[2][1], g->board[2][2]);
-        sendto(sockfd, msg, strlen(msg), 0, (struct sockaddr *)mcast_addr, sizeof(*mcast_addr));
+        send(g->player1, msg, strlen(msg), 0);
+        send(g->player2, msg, strlen(msg), 0);
     }
 }
 
@@ -197,6 +196,7 @@ void handle_game_result(int sockfd, struct sockaddr_in *client_addr, const char 
 }
 
 int main() {
+
     int sockfd;
     struct sockaddr_in server_addr, mcast_addr, client_addr;
     socklen_t addr_len = sizeof(client_addr);
@@ -213,6 +213,13 @@ int main() {
     server_addr.sin_family = AF_INET;
     server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
     server_addr.sin_port = htons(MULTICAST_PORT);
+
+    int optval = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+        perror("setsockopt SO_REUSEADDR");
+        close(sockfd);
+        exit(EXIT_FAILURE);
+    }
 
     if (bind(sockfd, (struct sockaddr *)&server_addr, sizeof(server_addr)) < 0) {
         perror("bind failed");
@@ -245,29 +252,59 @@ int main() {
         games[i].finished = 1;
     }
 
+    fd_set readfds;
+    int maxfd = 0;
+
     while (1) {
+        FD_ZERO(&readfds);
+        // Dodaj wszystkie aktywne sockety TCP graczy do zbioru
+        for (int i = 0; i < player_count; i++) {
+            if (players[i].tcp_sockfd > 0) {
+                FD_SET(players[i].tcp_sockfd, &readfds);
+                if (players[i].tcp_sockfd > maxfd) maxfd = players[i].tcp_sockfd;
+            }
+        }
+
+        // select czeka na dane na którymkolwiek z socketów TCP
+        int ready = select(maxfd + 1, &readfds, NULL, NULL, NULL);
+        if (ready < 0) continue;
+
+        for (int i = 0; i < player_count; i++) {
+            int s = players[i].tcp_sockfd;
+            if (s > 0 && FD_ISSET(s, &readfds)) {
+                char buf[BUF_SIZE];
+                int n = recv(s, buf, BUF_SIZE-1, 0);
+                if (n <= 0) {
+                    close(s);
+                    players[i].tcp_sockfd = 0;
+                    continue;
+                }
+                buf[n] = 0;
+                // Oczekiwany format: "MOVE <row> <col>\n"
+                int row, col;
+                if (sscanf(buf, "MOVE %d %d", &row, &col) == 2) {
+                    int game_idx = players[i].in_game;
+                    if (game_idx != -1) {
+                        handle_move_tcp(&games[game_idx], s, row, col); // patrz niżej
+                    }
+                }
+            }
+        }
+
         int n = recvfrom(sockfd, buffer, BUF_SIZE - 1, 0, (struct sockaddr *)&client_addr, &addr_len);
         if (n < 0) continue;
         buffer[n] = '\0';
 
-        // Protokół: "ADD_PLAYER <nick>", "CHALLENGE <nick>", "MOVE <nick> <row> <col>"
         if (strncmp(buffer, "ADD_PLAYER ", 11) == 0) {
             add_player(buffer + 11, &client_addr);
-            // Wysyłaj listę graczy do wszystkich przez multicast
             send_player_list(sockfd, &mcast_addr);
         } else if (strncmp(buffer, "CHALLENGE ", 10) == 0) {
             char challenger[32], opponent[32];
             sscanf(buffer + 10, "%31s %31s", challenger, opponent);
             int idx = find_player(challenger);
             if (idx != -1) handle_challenge(sockfd, idx, opponent, &mcast_addr);
-        } else if (strncmp(buffer, "MOVE ", 5) == 0) {
-            char name[32];
-            int row, col;
-            sscanf(buffer + 5, "%31s %d %d", name, &row, &col);
-            int idx = find_player(name);
-            if (idx != -1) handle_move(sockfd, idx, row, col, &mcast_addr);
         }
-        // ...obsługa innych komend...
+        
     }
 
     close(sockfd);
