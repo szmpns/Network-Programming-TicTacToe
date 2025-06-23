@@ -202,8 +202,7 @@ void handle_game_result(int sockfd, struct sockaddr_in *client_addr, const char 
     save_scores();
 }
 
-int
-daemon_init(const char *pname, int facility, uid_t uid, int socket)
+int daemon_init(const char *pname, int facility, uid_t uid, int socket)
 {
 	int		i, p;
 	pid_t	pid;
@@ -235,13 +234,12 @@ daemon_init(const char *pname, int facility, uid_t uid, int socket)
 
 	openlog(pname, LOG_PID, facility);
 	
-    syslog(LOG_ERR," STDIN =   %i\n", p);
 	setuid(uid);
 	
 	return (0);
 }
 
-int main() {
+int main(int argc, char **argv) {
     int sockfd;
     struct sockaddr_in server_addr, mcast_addr, client_addr;
     socklen_t addr_len = sizeof(client_addr);
@@ -292,6 +290,10 @@ int main() {
         games[i].player2 = -1;
         games[i].finished = 1;
     }
+
+    daemon_init(argv[0], LOG_USER, 1000, sockfd);
+    syslog (LOG_NOTICE, "Program started by User %d", getuid ());
+	syslog (LOG_INFO,"Waiting for clients ... ");
 
     while (1) {
         int n = recvfrom(sockfd, buffer, BUF_SIZE - 1, 0, (struct sockaddr *)&client_addr, &addr_len);
