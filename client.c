@@ -3,8 +3,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <netdb.h>
 
-#define MULTICAST_GROUP "239.0.0.1"
 #define MULTICAST_PORT 12345
 #define BUF_SIZE 256
 
@@ -23,7 +23,30 @@ void receive_messages(int sockfd) {
     }
 }
 
-int main() {
+int main(int argc, char **argv) {
+
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <adres-FQDN-gry>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET; // IPv4
+    hints.ai_socktype = SOCK_DGRAM;
+
+    if (getaddrinfo(argv[1], NULL, &hints, &res) != 0) {
+        perror("getaddrinfo failed");
+        exit(EXIT_FAILURE);
+    }
+
+    struct sockaddr_in *resolved_addr = (struct sockaddr_in *)res->ai_addr;
+    char multicast_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(resolved_addr->sin_addr), multicast_ip, sizeof(multicast_ip));
+    freeaddrinfo(res);
+
+    printf("Resolved multicast IP: %s\n", multicast_ip);
+
     int sockfd;
     struct sockaddr_in addr;
     struct ip_mreq mreq;
@@ -35,6 +58,9 @@ int main() {
         perror("socket creation failed");
         exit(EXIT_FAILURE);
     }
+
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) < 0)
+        perror("setsockopt failed");
 
     // Ustawienie adresu klienta (dla multicast)
     memset(&addr, 0, sizeof(addr));
@@ -48,7 +74,7 @@ int main() {
     }
 
     // Dołączenie do grupy multicastowej
-    mreq.imr_multiaddr.s_addr = inet_addr(MULTICAST_GROUP);
+    mreq.imr_multiaddr.s_addr = inet_addr(multicast_ip);
     mreq.imr_interface.s_addr = htonl(INADDR_ANY);
     if (setsockopt(sockfd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
         perror("setsockopt IP_ADD_MEMBERSHIP");
@@ -59,12 +85,13 @@ int main() {
     printf("Enter your player name: ");
     fgets(name, sizeof(name), stdin);
     name[strcspn(name, "\n")] = 0;
+
     // Wysyłanir do serwera informację o graczu (ADD_PLAYER)
     snprintf(buffer, sizeof(buffer), "ADD_PLAYER %s", name);
     struct sockaddr_in mcast_addr;
     memset(&mcast_addr, 0, sizeof(mcast_addr));
     mcast_addr.sin_family = AF_INET;
-    mcast_addr.sin_addr.s_addr = inet_addr(MULTICAST_GROUP);
+    mcast_addr.sin_addr.s_addr = inet_addr(multicast_ip);
     mcast_addr.sin_port = htons(MULTICAST_PORT);
 
     sendto(sockfd, buffer, strlen(buffer), 0, (struct sockaddr *)&mcast_addr, sizeof(mcast_addr));
