@@ -61,7 +61,7 @@ int main() {
 
     printf("Połączono z serwerem TCP\n");
     //Wyślij dane gracza do serwera
-    char player_name[50];
+    char player_name[32];
     printf("Podaj swoje imię: ");
     if (fgets(player_name, sizeof(player_name), stdin) == NULL) {
         perror("fgets");

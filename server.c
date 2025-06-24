@@ -44,7 +44,7 @@ Player add_player(char *name, struct sockaddr_in *addr, int tcp_sockfd) {
     new_player.name[strlen(name)] = '\0';
     new_player.addr = *addr;
     new_player.score = 0;
-    new_player.in_game = 0;
+    new_player.in_game = -1;
     new_player.symbol = ' ';
     new_player.tcp_sockfd = tcp_sockfd;
     return new_player;
@@ -53,9 +53,9 @@ Player add_player(char *name, struct sockaddr_in *addr, int tcp_sockfd) {
 void remove_player(Player *players, int *player_count, int tcp_sockfd) {
     for (int i = 0; i < *player_count; i++) {
         if (players[i].tcp_sockfd == tcp_sockfd) {
-            for (int j = i; j < *player_count - 1; j++) {
+            // Przesuwamy pozostałych graczy w lewo
+            for (int j = i; j < *player_count - 1; j++)
                 players[j] = players[j + 1];
-            }
             (*player_count)--;
             break;
         }
@@ -63,8 +63,28 @@ void remove_player(Player *players, int *player_count, int tcp_sockfd) {
     
 }
 
+Player find_player_by_name(Player *players, int player_count, const char *name) {
+    for (int i = 0; i < player_count; i++) {
+        if (strcmp(players[i].name, name) == 0) {
+            return players[i];
+        }
+    }
+    Player empty_player = { .name = "", .addr = {0}, .score = 0, .in_game = -1, .symbol = ' ' };
+    return empty_player; // Zwraca pustego gracza jeśli nie znaleziono
+}
+
+void clear_game(Game *game) {
+    game->player1 = -1;
+    game->player2 = -1;
+    memset(game->board, ' ', sizeof(game->board));
+    game->turn = 0;
+    game->finished = 0;
+}
+
 Player *players;
+Game *games;
 int *player_count;
+int *game_count;
 
 int main() {
     int udp_sock, tcp_sock;
@@ -132,6 +152,17 @@ int main() {
     player_count = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE,
                     MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     *player_count = 0;
+
+    games = mmap(NULL, sizeof(Game) * 5, PROT_READ | PROT_WRITE,
+               MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    game_count = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE,
+                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    *game_count = 0;
+
+    //inicjalizacja gier
+    for (int i = 0; i < 5; i++) {
+        clear_game(&games[i]);
+    }
 
     while (1) {
         FD_ZERO(&readfds);
@@ -228,6 +259,7 @@ int main() {
                     buffer[n] = '\0';
                     char field;
                     char sign;
+                    char player1_name[32], player2_name[32];
                     char board[9] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
                     
                     printf("Otrzymano od klienta: %s\n", buffer);
@@ -239,13 +271,38 @@ int main() {
                             board[index - 1] = symbol;
                             send(client_sock, board, strlen(board), 0);
                         } 
-                    } else if(sscanf(buffer, "LIST") == 0) {
+                    } else if(strncmp(buffer, "LIST", 4) == 0) {
                         char player_list[BUFFER_SIZE] = "Aktywni gracze:\n";
                         for (int i = 0; i < *player_count; i++) {
                             strcat(player_list, players[i].name);
                             strcat(player_list, "\n");
                         }
                         send(client_sock, player_list, strlen(player_list), 0);
+                    } else if(sscanf(buffer, "CHALLANGE %31s %31s", player1_name, player2_name) == 2){
+                        int found = 0;
+                        printf("Wyzwanie od %s do %s\n", player1_name, player2_name);
+                        if(*player_count < 2) {
+                            send(client_sock, "Za mało graczy do rozpoczęcia gry.\n", 36, 0);
+                            continue;
+                        }
+                        for (int i = 0; i < *player_count; i++) {
+                            if (strcmp(players[i].name, player1_name) == 0 && players[i].in_game == -1) {
+                                players[i].symbol = 'X';
+                                players[i].in_game = *game_count;
+                                games[*game_count].player1 = players[i].tcp_sockfd;
+                            } else if (strcmp(players[i].name, player2_name) == 0 && players[i].in_game == -1) {
+                                players[i].symbol = 'O';
+                                players[i].in_game = *game_count;
+                                games[*game_count].player2 = players[i].tcp_sockfd;
+                                found = 1;
+                            }
+                        }
+                        if (!found) {
+                            send(client_sock, "Gracz nie znaleziony lub obecnie podczas rozgrywki.\n", 53, 0);
+                        } else {
+                            send(client_sock, "Rozpoczęto grę!\n", 17, 0);
+                            clear_game(&games[*game_count]);
+                        }
                     } else {
                         send(client_sock, "Nieznana komenda\n", 17, 0);
                     }
