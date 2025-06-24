@@ -63,14 +63,76 @@ void remove_player(Player *players, int *player_count, int tcp_sockfd) {
     
 }
 
-Player find_player_by_name(Player *players, int player_count, const char *name) {
+Player* find_player_by_name(Player *players, int player_count, const char *name) {
     for (int i = 0; i < player_count; i++) {
         if (strcmp(players[i].name, name) == 0) {
-            return players[i];
+            return &players[i];
         }
     }
-    Player empty_player = { .name = "", .addr = {0}, .score = 0, .in_game = -1, .symbol = ' ' };
-    return empty_player; // Zwraca pustego gracza jeśli nie znaleziono
+    return NULL; // Zwraca NULL jeśli nie znaleziono
+}
+
+int check_win_magic_square(char board[9], char player) {
+    const int magic[9] = {2, 7, 6,
+                          9, 5, 1,
+                          4, 3, 8};
+
+    int selected[5];  // maksymalnie 5 pól może mieć gracz
+    int count = 0;
+
+    // Zbieramy wartości magiczne zajęte przez danego gracza
+    for (int i = 0; i < 9; ++i) {
+        if (board[i] == player) {
+            selected[count++] = magic[i];
+        }
+    }
+
+    // Sprawdzamy wszystkie trójki spośród wybranych liczb
+    for (int i = 0; i < count; ++i) {
+        for (int j = i + 1; j < count; ++j) {
+            for (int k = j + 1; k < count; ++k) {
+                if (selected[i] + selected[j] + selected[k] == 15) {
+                    return 1; // gracz wygrał
+                }
+            }
+        }
+    }
+
+    return 0; // brak wygranej
+}
+
+void update_score_in_file(const char *player_name, int score) {
+    FILE *file = fopen("scores.txt", "r");
+    char lines[100][64];
+    int found = 0, count = 0;
+
+    // Wczytaj wszystkie linie do pamięci
+    while (file && fgets(lines[count], sizeof(lines[count]), file)) {
+        char name[32];
+        int old_score;
+        if (sscanf(lines[count], "%31s %d", name, &old_score) == 2) {
+            if (strcmp(name, player_name) == 0) {
+                old_score += score; // dodaj do aktualnego wyniku
+                snprintf(lines[count], sizeof(lines[count]), "%s %d\n", player_name, old_score);
+                found = 1;
+            }
+        }
+        count++;
+    }
+    if (file) fclose(file);
+
+    // Jeśli nie znaleziono, dodaj nową linię
+    if (!found) {
+        snprintf(lines[count++], sizeof(lines[0]), "%s %d\n", player_name, score);
+    }
+
+    // Zapisz wszystko z powrotem do pliku
+    file = fopen("scores.txt", "w");
+    if (!file) return;
+    for (int i = 0; i < count; i++) {
+        fputs(lines[i], file);
+    }
+    fclose(file);
 }
 
 void clear_game(Game *game) {
@@ -237,8 +299,21 @@ int main() {
                     exit(1);
                 }
                 buffer[n] = '\0';
-                
-                //Teraz dodajesz gracza na podstawie danych wpisanych przez klienta
+
+                // ...po odebraniu imienia gracza:
+                int name_taken = 0;
+                for (int i = 0; i < *player_count; i++) {
+                    if (strcmp(players[i].name, buffer) == 0) {
+                        name_taken = 1;
+                        break;
+                    }
+                }
+                if (name_taken) {
+                    const char *msg = "Nazwa gracza jest już zajęta. Wybierz inną.\n";
+                    send(client_sock, msg, strlen(msg), 0);
+                    close(client_sock);
+                    exit(0);
+                }
                 players[*player_count] = add_player(buffer, &tcp_client, client_sock);
                 (*player_count)++;
 
@@ -270,9 +345,13 @@ int main() {
                     //poprawić w tym movie, eby wysyłało do obu graczy bo narazie tylko odsyła do tego co wysłał
 
                     if (sscanf(buffer, "MOVE %d %31s", &index, player_name) == 2) {
+                        if(find_player_by_name(players, *player_count, player_name)->in_game == -1) {
+                            send(client_sock, "Nie jesteś w grze!\n", 21, 0);
+                            continue;
+                        }
                         if (index >= 1 && index <= 9) {
-                           int game_id = find_player_by_name(players, *player_count, player_name).in_game;
-                           symbol = find_player_by_name(players, *player_count, player_name).symbol;
+                           int game_id = find_player_by_name(players, *player_count, player_name)->in_game;
+                           symbol = find_player_by_name(players, *player_count, player_name)->symbol;
 
                             if(games[game_id].board[index - 1] != ' ') {
                                 send(client_sock, "To pole jest już zajęte!\n", 26, 0);
@@ -280,9 +359,42 @@ int main() {
                                        (games[game_id].turn % 2 == 1 && symbol == 'O')) {
                                 games[game_id].board[index - 1] = symbol;
                                 games[game_id].turn++;
-                                // tutaj jest rozjebane
-                                send(games[game_id].player1, games[game_id].board, n, 0);
-                                send(games[game_id].player2, games[game_id].board, n, 0);
+                                
+                                // Sformatuj planszę do stringa
+                                char board_msg[BUFFER_SIZE];
+                                snprintf(board_msg, sizeof(board_msg),
+                                    "%c|%c|%c\n- - -\n%c|%c|%c\n- - -\n%c|%c|%c\n",
+                                    games[game_id].board[0], games[game_id].board[1], games[game_id].board[2],
+                                    games[game_id].board[3], games[game_id].board[4], games[game_id].board[5],
+                                    games[game_id].board[6], games[game_id].board[7], games[game_id].board[8]
+                                );
+
+                                // tutaj check win/draw
+                                if (check_win_magic_square(games[game_id].board, symbol)) {
+                                    char win_msg[BUFFER_SIZE];
+                                    snprintf(win_msg, sizeof(win_msg), "Gratulacje %s! Wygrałeś!\n", player_name);
+                                    send(games[game_id].player1, win_msg, strlen(win_msg), 0);
+                                    games[game_id].finished = 1;
+                                    find_player_by_name(players, *player_count, player_name)->in_game = -1;
+                                    find_player_by_name(players, *player_count, player_name)->symbol = ' ';
+                                    find_player_by_name(players, *player_count, player_name)->score++;
+                                    update_score_in_file(player_name, 1);
+                                    clear_game(&games[game_id]);
+                                } else if (games[game_id].turn == 9) {
+                                    const char *draw_msg = "Remis!\n";
+                                    send(games[game_id].player1, draw_msg, strlen(draw_msg), 0);
+                                    games[game_id].finished = 1;
+                                    find_player_by_name(players, *player_count, player_name)->in_game = -1;
+                                    find_player_by_name(players, *player_count, player_name)->symbol = ' ';
+                                    find_player_by_name(players, *player_count, player_name)->score++;
+                                    clear_game(&games[game_id]);
+                                }
+                                //nie wiem dla czego to wysyła dwa razy do jednego gracza
+                                //tutaj jeszcze zmienic tak zeby kasowalo dane z drugiego gracza
+
+                                send(games[game_id].player1, board_msg, strlen(board_msg), 0);
+                                //send(games[game_id].player2, board_msg, strlen(board_msg), 0);
+
                            } else {
                                send(client_sock, "Nie twoja kolej!\n", 17, 0);
                                continue;
@@ -296,16 +408,25 @@ int main() {
                         char player_list[BUFFER_SIZE] = "Aktywni gracze:\n";
                         for (int i = 0; i < *player_count; i++) {
                             strcat(player_list, players[i].name);
+                            char score_str[12];
+                            snprintf(score_str, sizeof(score_str), " %d", players[i].score);
+                            strcat(player_list, score_str);
                             strcat(player_list, "\n");
                         }
                         send(client_sock, player_list, strlen(player_list), 0);
-                    } else if(sscanf(buffer, "CHALLANGE %31s %31s", player1_name, player2_name) == 2){
+                    } else if(sscanf(buffer, "CHALLENGE %31s %31s", player1_name, player2_name) == 2){
                         int found = 0;
                         printf("Wyzwanie od %s do %s\n", player1_name, player2_name);
                         if(*player_count < 2) {
                             send(client_sock, "Za mało graczy do rozpoczęcia gry.\n", 36, 0);
                             continue;
                         }
+
+                        if(strcmp(player1_name, player2_name) == 0) {
+                            send(client_sock, "Nie możesz wyzwać samego siebie.\n", 34, 0);
+                            continue;
+                        }
+
 
                         int k,m;
                         for (int i = 0; i < *player_count; i++) {
@@ -335,8 +456,22 @@ int main() {
                             snprintf(start_msg, sizeof(start_msg), "Rozpoczęto grę! Zaczyna gracz %s\n", player1_name);
                             send(client_sock, start_msg, strlen(start_msg), 0);
                         }
-                    } else {
-                        send(client_sock, "Nieznana komenda\n", 17, 0);
+                    }else if(strcmp(buffer, "SCORE") == 0){
+                        FILE *file = fopen("scores.txt", "r");
+                        char score_list[BUFFER_SIZE] = "Wyniki graczy:\n";
+                        char line[64];
+                        if (file) {
+                            while (fgets(line, sizeof(line), file)) {
+                                strcat(score_list, line);
+                            }
+                            fclose(file);
+                        } else {
+                            strcat(score_list, "Brak wyników.\n");
+                        }
+                        send(client_sock, score_list, strlen(score_list), 0);
+                    } 
+                    else {
+                        send(client_sock, "Nieznana komenda. Dostępne komendy to: MOVE <pole>, LIST, CHALLENGE <gracz>\n", 64, 0);
                     }
                 }
 

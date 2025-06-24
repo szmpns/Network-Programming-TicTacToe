@@ -73,33 +73,71 @@ int main() {
     player_name[strcspn(player_name, "\n")] = '\0'; // Usuń znak nowej linii
     send(tcp_sock, player_name, strlen(player_name), 0);
 
+    printf("Jaką akcję chcesz wykonać (q aby wyjść): ");
 
     pid_t pid = fork();
+
+
 if (pid == 0) {
     // Proces potomny: odbieranie wiadomości od serwera
     while (1) {
+        memset(buffer, 0, sizeof(buffer)); 
         int n = recv(tcp_sock, buffer, sizeof(buffer) - 1, 0);
         if (n <= 0) {
             printf("Serwer zakończył połączenie\n");
+            kill(getppid(), SIGKILL);
             exit(0);
         }
         buffer[n] = '\0';
-        printf("\n[Serwer]: %s\n", buffer);
-        printf("Wpisz wiadomość do serwera (q aby wyjść): ");
+        printf("[Serwer]: \n%s", buffer);
+        printf("Jaką akcję chcesz wykonać (q aby wyjść): ");
         fflush(stdout);
     }
     exit(0);
 } else {
     // Proces macierzysty: wysyłanie wiadomości do serwera
-    printf("Wpisz wiadomość do serwera (q aby wyjść): ");
     while (1) {
+
         if (fgets(buffer, sizeof(buffer), stdin) == NULL)
             break;
+
+        buffer[strcspn(buffer, "\n")] = '\0'; // Usuń znak nowej linii
 
         if (buffer[0] == 'q' && (buffer[1] == '\n' || buffer[1] == '\0'))
             break;
 
-        send(tcp_sock, buffer, strlen(buffer), 0);
+        char msg[BUFFER_SIZE];
+        if(strncmp(buffer, "MOVE ", 5) == 0){
+            char move_arg[BUFFER_SIZE];
+            strncpy(move_arg, buffer + 5, sizeof(move_arg));
+            move_arg[sizeof(move_arg) - 1] = '\0';
+            // Usuń spacje z końca
+            for(int i = strlen(move_arg) - 1; i >= 0 && move_arg[i] == ' '; i--) {
+                move_arg[i] = '\0';
+            }
+            snprintf(msg, sizeof(msg), "MOVE %s %s", move_arg, player_name);
+            send(tcp_sock, msg, strlen(msg), 0);
+        } else if(strncmp(buffer, "CHALLENGE ", 10) == 0) {
+            char chall_arg[BUFFER_SIZE];
+            strncpy(chall_arg, buffer + 10, sizeof(chall_arg));
+            chall_arg[sizeof(chall_arg) - 1] = '\0';
+            for(int i = strlen(chall_arg) - 1; i >= 0 && chall_arg[i] == ' '; i--) {
+                chall_arg[i] = '\0';
+            }
+            snprintf(msg, sizeof(msg), "CHALLENGE %s %s", chall_arg, player_name);
+            send(tcp_sock, msg, strlen(msg), 0);
+        } else if(strncmp(buffer, "LIST", 4) == 0) {
+            snprintf(msg, sizeof(msg), "LIST");
+            send(tcp_sock, msg, strlen(msg), 0);
+        } else if(strncmp(buffer, "SCORE", 5) == 0) {
+            snprintf(msg, sizeof(msg), "SCORE");
+            send(tcp_sock, msg, strlen(msg), 0);
+        } else {
+            printf("Nieznana komenda. Dostępne komendy to: MOVE <pole>, LIST, CHALLENGE <gracz>\n");
+            continue;
+        }
+
+        
     }
     close(tcp_sock);
     kill(pid, SIGKILL); // zakończ proces potomny
