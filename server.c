@@ -138,7 +138,9 @@ void update_score_in_file(const char *player_name, int score) {
 void clear_game(Game *game) {
     game->player1 = -1;
     game->player2 = -1;
-    memset(game->board, ' ', sizeof(game->board));
+    for (int i = 0; i < 9; i++) {
+        game->board[i] = ' ';
+    }
     game->turn = 0;
     game->finished = 0;
 }
@@ -334,9 +336,7 @@ int main() {
                     buffer[n] = '\0';
                     char field;
                     char sign;
-                    char player1_name[32], player2_name[32], player_name[32];
-                    char board[9] = {' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ' };
-                    
+                    char player1_name[32], player2_name[32], player_name[32];                    
                     printf("Otrzymano od klienta: %s\n", buffer);
                     
                     int index;
@@ -455,6 +455,7 @@ int main() {
                             char start_msg[BUFFER_SIZE];
                             snprintf(start_msg, sizeof(start_msg), "Rozpoczęto grę! Zaczyna gracz %s\n", player1_name);
                             send(client_sock, start_msg, strlen(start_msg), 0);
+                            (*game_count)++;
                         }
                     }else if(strcmp(buffer, "SCORE") == 0){
                         FILE *file = fopen("scores.txt", "r");
