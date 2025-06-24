@@ -4,9 +4,6 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
-//2 na multikascie tylko scors a w pentli dla danego klienta robimy konkretnie nowy soket
-//3 obsługa sygnałow
-//4 zmienic tablice playerow na sokety TCP 
 
 #define MULTICAST_GROUP "239.0.0.1"
 #define MULTICAST_PORT 12345
