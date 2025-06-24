@@ -60,13 +60,18 @@ int main() {
     }
 
     printf("Połączono z serwerem TCP\n");
-
-    // Odbierz dane od serwera
-    int n = recv(tcp_sock, buffer, BUFFER_SIZE - 1, 0);
-    if (n > 0) {
-        buffer[n] = '\0';
-        printf("Serwer: %s\n", buffer);
+    //Wyślij dane gracza do serwera
+    char player_name[50];
+    printf("Podaj swoje imię: ");
+    if (fgets(player_name, sizeof(player_name), stdin) == NULL) {
+        perror("fgets");
+        close(tcp_sock);
+        exit(1);
     }
+    player_name[strcspn(player_name, "\n")] = '\0'; // Usuń znak nowej linii
+    send(tcp_sock, player_name, strlen(player_name), 0);
+
+
     while (1) {
         printf("Wpisz wiadomość do serwera (q aby wyjść): ");
         if (fgets(buffer, sizeof(buffer), stdin) == NULL)
@@ -78,13 +83,13 @@ int main() {
         send(tcp_sock, buffer, strlen(buffer), 0);
     
         // Odbierz echo od serwera
-        n = recv(tcp_sock, buffer, sizeof(buffer) - 1, 0);
+        int n = recv(tcp_sock, buffer, sizeof(buffer) - 1, 0);
         if (n <= 0) {
             printf("Serwer zakończył połączenie\n");
             break;
         }
         buffer[n] = '\0';
-        printf("Echo od serwera: %s\n", buffer);
+        printf("Echo od serwera: \n%s\n", buffer);
     }
     close(tcp_sock);
     return 0;

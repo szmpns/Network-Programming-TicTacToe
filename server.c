@@ -10,15 +10,61 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <sys/mman.h>
 
 #define MULTICAST_GROUP "239.0.0.1"
 #define MULTICAST_PORT 12345
 #define TCP_PORT 54321
 #define BUFFER_SIZE 1024
 
+typedef struct {
+    char name[32];
+    struct sockaddr_in addr;
+    int score;
+    int in_game;
+    char symbol; 
+    int tcp_sockfd;
+} Player;
+
+typedef struct {
+    int player1; 
+    int player2;
+    char board[9];
+    int turn;
+    int finished;
+} Game;
+
 void sigchld_handler(int signo) {
     while (waitpid(-1, NULL, WNOHANG) > 0);
 }
+
+Player add_player(char *name, struct sockaddr_in *addr, int tcp_sockfd) {
+    Player new_player;
+    strncpy(new_player.name, name, strlen(name));
+    new_player.name[strlen(name)] = '\0';
+    new_player.addr = *addr;
+    new_player.score = 0;
+    new_player.in_game = 0;
+    new_player.symbol = ' ';
+    new_player.tcp_sockfd = tcp_sockfd;
+    return new_player;
+}
+
+void remove_player(Player *players, int *player_count, int tcp_sockfd) {
+    for (int i = 0; i < *player_count; i++) {
+        if (players[i].tcp_sockfd == tcp_sockfd) {
+            for (int j = i; j < *player_count - 1; j++) {
+                players[j] = players[j + 1];
+            }
+            (*player_count)--;
+            break;
+        }
+    }
+    
+}
+
+Player *players;
+int *player_count;
 
 int main() {
     int udp_sock, tcp_sock;
@@ -80,6 +126,13 @@ int main() {
     fd_set readfds;
     int maxfd = (udp_sock > tcp_sock) ? udp_sock : tcp_sock;
 
+    //Współdzielona pamięć dla kazdego forka
+    players = mmap(NULL, sizeof(Player) * 10, PROT_READ | PROT_WRITE,
+               MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    player_count = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE,
+                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    *player_count = 0;
+
     while (1) {
         FD_ZERO(&readfds);
         FD_SET(udp_sock, &readfds);
@@ -130,22 +183,44 @@ int main() {
             }
 
             if (pid == 0) {
-                char board[9];
+                // Sprawdź, czy serwer jest pełny
+                if(*player_count >= 10) {
+                    const char *msg = "Serwer pełny. Spróbuj ponownie później.\n";
+                    send(client_sock, msg, strlen(msg), 0);
+                    close(client_sock);
+                    exit(0);
+                }
+
                 // Proces potomny - obsługuje klienta TCP
                 close(tcp_sock);
                 printf("Nowy klient TCP: %s:%d\n",
                        inet_ntoa(tcp_client.sin_addr), ntohs(tcp_client.sin_port));
+                
+
+
+                // Odbierz imię gracza
+                ssize_t n = recv(client_sock, buffer, BUFFER_SIZE - 1, 0);
+                if (n <= 0) {
+                    perror("recv");
+                    close(client_sock);
+                    exit(1);
+                }
+                buffer[n] = '\0';
+                
+                //Teraz dodajesz gracza na podstawie danych wpisanych przez klienta
+                players[*player_count] = add_player(buffer, &tcp_client, client_sock);
+                (*player_count)++;
 
                 // --- aktywni gracze ---
                 // const char *info = "Lista aktywnych graczy: [tu przykładowa lista]\n";
                 
-                send(client_sock, board, strlen(board), 0);
-                
                 while (1) {
                     ssize_t n = recv(client_sock, buffer, BUFFER_SIZE - 1, 0);
                     if (n <= 0) {
-                        if (n == 0)
+                        if (n == 0){
+                            remove_player(players, player_count, client_sock);
                             printf("Klient rozłączył się\n");
+                        }
                         else
                             perror("recv");
                         break;
@@ -164,6 +239,13 @@ int main() {
                             board[index - 1] = symbol;
                             send(client_sock, board, strlen(board), 0);
                         } 
+                    } else if(sscanf(buffer, "LIST") == 0) {
+                        char player_list[BUFFER_SIZE] = "Aktywni gracze:\n";
+                        for (int i = 0; i < *player_count; i++) {
+                            strcat(player_list, players[i].name);
+                            strcat(player_list, "\n");
+                        }
+                        send(client_sock, player_list, strlen(player_list), 0);
                     } else {
                         send(client_sock, "Nieznana komenda\n", 17, 0);
                     }
