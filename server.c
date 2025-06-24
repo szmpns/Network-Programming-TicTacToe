@@ -280,6 +280,7 @@ int main() {
                                        (games[game_id].turn % 2 == 1 && symbol == 'O')) {
                                 games[game_id].board[index - 1] = symbol;
                                 games[game_id].turn++;
+                                // tutaj jest rozjebane
                                 send(games[game_id].player1, games[game_id].board, n, 0);
                                 send(games[game_id].player2, games[game_id].board, n, 0);
                            } else {
