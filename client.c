@@ -4,8 +4,10 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <signal.h>
 #include <sys/socket.h>
 #include <time.h>
+
 
 #define MULTICAST_GROUP "239.0.0.1"
 #define MULTICAST_PORT 12345
@@ -72,25 +74,35 @@ int main() {
     send(tcp_sock, player_name, strlen(player_name), 0);
 
 
+    pid_t pid = fork();
+if (pid == 0) {
+    // Proces potomny: odbieranie wiadomości od serwera
     while (1) {
-        printf("Wpisz wiadomość do serwera (q aby wyjść): ");
-        if (fgets(buffer, sizeof(buffer), stdin) == NULL)
-            break;
-    
-        if (buffer[0] == 'q' && (buffer[1] == '\n' || buffer[1] == '\0'))
-            break;
-    
-        send(tcp_sock, buffer, strlen(buffer), 0);
-    
-        // Odbierz echo od serwera
         int n = recv(tcp_sock, buffer, sizeof(buffer) - 1, 0);
         if (n <= 0) {
             printf("Serwer zakończył połączenie\n");
-            break;
+            exit(0);
         }
         buffer[n] = '\0';
-        printf("Echo od serwera: \n%s\n", buffer);
+        printf("\n[Serwer]: %s\n", buffer);
+        printf("Wpisz wiadomość do serwera (q aby wyjść): ");
+        fflush(stdout);
+    }
+    exit(0);
+} else {
+    // Proces macierzysty: wysyłanie wiadomości do serwera
+    printf("Wpisz wiadomość do serwera (q aby wyjść): ");
+    while (1) {
+        if (fgets(buffer, sizeof(buffer), stdin) == NULL)
+            break;
+
+        if (buffer[0] == 'q' && (buffer[1] == '\n' || buffer[1] == '\0'))
+            break;
+
+        send(tcp_sock, buffer, strlen(buffer), 0);
     }
     close(tcp_sock);
+    kill(pid, SIGKILL); // zakończ proces potomny
     return 0;
+}
 }
