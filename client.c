@@ -7,14 +7,37 @@
 #include <signal.h>
 #include <sys/socket.h>
 #include <time.h>
+#include <netdb.h>
 
 
-#define MULTICAST_GROUP "239.0.0.1"
 #define MULTICAST_PORT 12345
 #define TCP_PORT 54321
 #define BUFFER_SIZE 1024
 
-int main() {
+int main(int argc, char **argv) {
+
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <nazwa-FQDN-serwera>\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET; // IPv4
+    hints.ai_socktype = SOCK_DGRAM;
+
+    if (getaddrinfo(argv[1], NULL, &hints, &res) != 0) {
+        perror("getaddrinfo failed");
+        exit(EXIT_FAILURE);
+    }
+
+    struct sockaddr_in *resolved_addr = (struct sockaddr_in *)res->ai_addr;
+    char multicast_ip[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &(resolved_addr->sin_addr), multicast_ip, sizeof(multicast_ip));
+    freeaddrinfo(res);
+
+    printf("Resolved multicast IP: %s\n", multicast_ip);
+    
     int udp_sock, tcp_sock;
     struct sockaddr_in mcast_addr, from_addr;
     socklen_t from_len = sizeof(from_addr);
@@ -29,9 +52,9 @@ int main() {
     memset(&mcast_addr, 0, sizeof(mcast_addr));
     mcast_addr.sin_family = AF_INET;
     mcast_addr.sin_port = htons(MULTICAST_PORT);
-    inet_pton(AF_INET, MULTICAST_GROUP, &mcast_addr.sin_addr);
+    inet_pton(AF_INET, multicast_ip, &mcast_addr.sin_addr);
 
-    const char* hello = "Cześć serwer, chce zagrać w gierke";
+    const char* hello = "Hello from remote";
     sendto(udp_sock, hello, strlen(hello), 0, (struct sockaddr*)&mcast_addr, sizeof(mcast_addr));
     printf("Wysłano do grupy multicast: %s\n", hello);
 
@@ -73,7 +96,7 @@ int main() {
     player_name[strcspn(player_name, "\n")] = '\0'; // Usuń znak nowej linii
     send(tcp_sock, player_name, strlen(player_name), 0);
 
-    printf("Jaką akcję chcesz wykonać (q aby wyjść): ");
+    printf("Jaką akcję chcesz wykonać (q aby wyjść, HELP aby uzyskac pomoc): ");
 
     pid_t pid = fork();
 
@@ -89,7 +112,7 @@ if (pid == 0) {
             exit(0);
         }
         buffer[n] = '\0';
-        printf("[Serwer]: \n%s", buffer);
+        printf("\n[Serwer]: \n%s", buffer);
         printf("Jaką akcję chcesz wykonać (q aby wyjść): ");
         fflush(stdout);
     }
@@ -132,8 +155,11 @@ if (pid == 0) {
         } else if(strncmp(buffer, "SCORE", 5) == 0) {
             snprintf(msg, sizeof(msg), "SCORE");
             send(tcp_sock, msg, strlen(msg), 0);
+        } else if (strncmp(buffer, "HELP", 4) == 0) {
+            printf("1) MOVE <pole>\n2) LIST\n3) CHALLENGE <gracz>\n4) SCORE\n");
+            continue;
         } else {
-            printf("Nieznana komenda. Dostępne komendy to: MOVE <pole>, LIST, CHALLENGE <gracz>\n");
+            printf("Nieznana komenda.\n");
             continue;
         }
 

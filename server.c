@@ -11,11 +11,14 @@
 #include <sys/wait.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include <syslog.h>
+#include <fcntl.h>
 
 #define MULTICAST_GROUP "239.0.0.1"
 #define MULTICAST_PORT 12345
 #define TCP_PORT 54321
 #define BUFFER_SIZE 1024
+#define MAXFD 32
 
 typedef struct {
     char name[32];
@@ -33,10 +36,6 @@ typedef struct {
     int turn;
     int finished;
 } Game;
-
-void sigchld_handler(int signo) {
-    while (waitpid(-1, NULL, WNOHANG) > 0);
-}
 
 Player add_player(char *name, struct sockaddr_in *addr, int tcp_sockfd) {
     Player new_player;
@@ -145,18 +144,71 @@ void clear_game(Game *game) {
     game->finished = 0;
 }
 
+int daemon_init(const char *pname, int facility, uid_t uid)
+{
+	int		i;
+	pid_t	pid;
+
+	if ( (pid = fork()) < 0)
+		return (-1);
+	else if (pid)
+		exit(0);
+
+	if (setsid() < 0)
+		return (-1);
+
+	signal(SIGHUP, SIG_IGN);
+	if ( (pid = fork()) < 0)
+		return (-1);
+	else if (pid)
+		exit(0);
+
+	chdir("/");
+
+	for (i = 0; i < MAXFD; i++){
+		close(i);
+	}
+
+	open("/dev/null", O_RDONLY);
+	open("/dev/null", O_RDWR);
+	open("/dev/null", O_RDWR);
+
+	openlog(pname, LOG_PID, facility);
+	
+	setuid(uid);
+	
+	return (0);
+}
+
+void send_board(Game *game) {
+    char board_msg[BUFFER_SIZE];
+    snprintf(board_msg, sizeof(board_msg),
+        "%c|%c|%c\n- - -\n%c|%c|%c\n- - -\n%c|%c|%c\n",
+        game->board[0], game->board[1], game->board[2],
+        game->board[3], game->board[4], game->board[5],
+        game->board[6], game->board[7], game->board[8]
+    );
+    send(game->player1, board_msg, strlen(board_msg), 0);
+    send(game->player2, board_msg, strlen(board_msg), 0);
+}
+
+
 Player *players;
 Game *games;
 int *player_count;
 int *game_count;
 
-int main() {
+int main(int argc, char **argv) {
+    if (daemon_init(argv[0], LOG_USER, 1000) < 0){
+        perror("daemon_init");
+        exit(1);
+    }
+    syslog (LOG_NOTICE, "Program started by User %d", getuid ());
+
     int udp_sock, tcp_sock;
     struct sockaddr_in mcast_addr, client_addr, tcp_addr;
     socklen_t addrlen = sizeof(client_addr);
     char buffer[BUFFER_SIZE];
-
-    signal(SIGCHLD, sigchld_handler);
 
     // --- UDP multicast socket ---
     udp_sock = socket(AF_INET, SOCK_DGRAM, 0);
@@ -204,13 +256,10 @@ int main() {
         exit(1);
     }
 
-    printf("Serwer gotowy. Nasłuch multicast %s:%d i TCP %d\n",
+    syslog(LOG_NOTICE, "Serwer gotowy. Nasłuch multicast %s:%d i TCP %d\n",
            MULTICAST_GROUP, MULTICAST_PORT, TCP_PORT);
 
-    fd_set readfds;
-    int maxfd = (udp_sock > tcp_sock) ? udp_sock : tcp_sock;
-
-    //Współdzielona pamięć dla kazdego forka
+    //Współdzielona pamięć
     players = mmap(NULL, sizeof(Player) * 10, PROT_READ | PROT_WRITE,
                MAP_SHARED | MAP_ANONYMOUS, -1, 0);
     player_count = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE,
@@ -228,16 +277,31 @@ int main() {
         clear_game(&games[i]);
     }
 
+    int client_socks[FD_SETSIZE];
+    struct sockaddr_in client_addrs[FD_SETSIZE];
+    for (int i = 0; i < FD_SETSIZE; i++) client_socks[i] = -1;
+
+    fd_set readfds;
+    int maxfd = (udp_sock > tcp_sock) ? udp_sock : tcp_sock;
+    if (maxfd < 0) maxfd = 0;
+
     while (1) {
         FD_ZERO(&readfds);
         FD_SET(udp_sock, &readfds);
         FD_SET(tcp_sock, &readfds);
+        if (udp_sock > maxfd) maxfd = udp_sock;
+        if (tcp_sock > maxfd) maxfd = tcp_sock;
+        for (int i = 0; i < FD_SETSIZE; i++) {
+            if (client_socks[i] != -1) {
+                FD_SET(client_socks[i], &readfds);
+                if (client_socks[i] > maxfd) maxfd = client_socks[i];
+            }
+        }
 
         int ready = select(maxfd + 1, &readfds, NULL, NULL, NULL);
         if (ready < 0) {
-            if (errno == EINTR) continue;
             perror("select");
-            exit(1);
+            continue;
         }
 
         // --- Multicast UDP packet ---
@@ -248,16 +312,15 @@ int main() {
                              (struct sockaddr*)&sender_addr, &sender_len);
             if (n < 0) {
                 perror("recvfrom");
-                continue;
+            } else {
+                buffer[n] = '\0';
+                syslog(LOG_NOTICE, "Multicast od %s: %s\n", inet_ntoa(sender_addr.sin_addr), buffer);
+                // Odpowiedź: "Witaj"
+                const char *msg = "Witaj";
+                sendto(udp_sock, msg, strlen(msg), 0,
+                       (struct sockaddr*)&sender_addr, sender_len);
+                syslog(LOG_INFO, "Odesłano 'Witaj' do %s\n", inet_ntoa(sender_addr.sin_addr));
             }
-            buffer[n] = '\0';
-            printf("Multicast od %s: %s\n", inet_ntoa(sender_addr.sin_addr), buffer);
-
-            // Odpowiedź: "Witaj"
-            const char *msg = "Witaj";
-            sendto(udp_sock, msg, strlen(msg), 0,
-                   (struct sockaddr*)&sender_addr, sender_len);
-            printf("Odesłano 'Witaj' do %s\n", inet_ntoa(sender_addr.sin_addr));
         }
 
         // --- Nowe połączenie TCP ---
@@ -267,225 +330,219 @@ int main() {
             int client_sock = accept(tcp_sock, (struct sockaddr*)&tcp_client, &tcp_client_len);
             if (client_sock < 0) {
                 perror("accept");
-                continue;
-            }
-
-            pid_t pid = fork();
-            if (pid < 0) {
-                perror("fork");
-                close(client_sock);
-                continue;
-            }
-
-            if (pid == 0) {
-                // Sprawdź, czy serwer jest pełny
-                if(*player_count >= 10) {
+            } else {
+                int added = 0;
+                for (int i = 0; i < FD_SETSIZE; i++) {
+                    if (client_socks[i] == -1) {
+                        client_socks[i] = client_sock;
+                        client_addrs[i] = tcp_client;
+                        added = 1;
+                        break;
+                    }
+                }
+                if (!added) {
                     const char *msg = "Serwer pełny. Spróbuj ponownie później.\n";
                     send(client_sock, msg, strlen(msg), 0);
                     close(client_sock);
-                    exit(0);
+                } else {
+                    syslog(LOG_NOTICE, "Nowy klient TCP: %s:%d\n",
+                           inet_ntoa(tcp_client.sin_addr), ntohs(tcp_client.sin_port));
                 }
+            }
+        }
 
-                // Proces potomny - obsługuje klienta TCP
-                close(tcp_sock);
-                printf("Nowy klient TCP: %s:%d\n",
-                       inet_ntoa(tcp_client.sin_addr), ntohs(tcp_client.sin_port));
-                
-
-
-                // Odbierz imię gracza
+        // --- Obsługa aktywnych klientów TCP ---
+        for (int i = 0; i < FD_SETSIZE; i++) {
+            int client_sock = client_socks[i];
+            if (client_sock != -1 && FD_ISSET(client_sock, &readfds)) {
                 ssize_t n = recv(client_sock, buffer, BUFFER_SIZE - 1, 0);
                 if (n <= 0) {
-                    perror("recv");
+                    if (n == 0) {
+                        remove_player(players, player_count, client_sock);
+                        syslog(LOG_NOTICE, "Klient rozłączył się\n");
+                    } else {
+                        perror("recv");
+                    }
                     close(client_sock);
-                    exit(1);
+                    client_socks[i] = -1;
+                    continue;
                 }
                 buffer[n] = '\0';
+                char field;
+                char sign;
+                char player1_name[32], player2_name[32], player_name[32];
+                syslog(LOG_INFO, "Otrzymano od klienta: %s\n", buffer);
+                int index;
+                char symbol;
 
-                // ...po odebraniu imienia gracza:
-                int name_taken = 0;
-                for (int i = 0; i < *player_count; i++) {
-                    if (strcmp(players[i].name, buffer) == 0) {
-                        name_taken = 1;
+                Player *p = NULL;
+                for (int j = 0; j < *player_count; j++) {
+                    if (players[j].tcp_sockfd == client_sock) {
+                        p = &players[j];
                         break;
                     }
                 }
-                if (name_taken) {
-                    const char *msg = "Nazwa gracza jest już zajęta. Wybierz inną.\n";
-                    send(client_sock, msg, strlen(msg), 0);
-                    close(client_sock);
-                    exit(0);
-                }
-                players[*player_count] = add_player(buffer, &tcp_client, client_sock);
-                (*player_count)++;
-
-                // --- aktywni gracze ---
-                // const char *info = "Lista aktywnych graczy: [tu przykładowa lista]\n";
-                
-                while (1) {
-                    ssize_t n = recv(client_sock, buffer, BUFFER_SIZE - 1, 0);
-                    if (n <= 0) {
-                        if (n == 0){
-                            remove_player(players, player_count, client_sock);
-                            printf("Klient rozłączył się\n");
+                if (!p) {
+                    int name_taken = 0;
+                    for (int j = 0; j < *player_count; j++) {
+                        if (strcmp(players[j].name, buffer) == 0) {
+                            name_taken = 1;
+                            break;
                         }
-                        else
-                            perror("recv");
-                        break;
                     }
-                    buffer[n] = '\0';
-                    char field;
-                    char sign;
-                    char player1_name[32], player2_name[32], player_name[32];                    
-                    printf("Otrzymano od klienta: %s\n", buffer);
-                    
-                    int index;
-                    char symbol;
+                    if (name_taken) {
+                        const char *msg = "Nazwa gracza jest już zajęta. Wybierz inną.\n";
+                        send(client_sock, msg, strlen(msg), 0);
+                        close(client_sock);
+                        client_socks[i] = -1;
+                        continue;
+                    }
+                    players[*player_count] = add_player(buffer, &client_addrs[i], client_sock);
+                    (*player_count)++;
+                    continue;
+                }
 
-                    //poprawić w tym movie, eby wysyłało do obu graczy bo narazie tylko odsyła do tego co wysłał
+                if (sscanf(buffer, "MOVE %d %31s", &index, player_name) == 2) {
+                    if(find_player_by_name(players, *player_count, player_name)->in_game == -1) {
+                        send(client_sock, "Nie jesteś w grze!\n", 21, 0);
+                        continue;
+                    }
+                    if (index >= 1 && index <= 9) {
+                       int game_id = find_player_by_name(players, *player_count, player_name)->in_game;
+                       symbol = find_player_by_name(players, *player_count, player_name)->symbol;
 
-                    if (sscanf(buffer, "MOVE %d %31s", &index, player_name) == 2) {
-                        if(find_player_by_name(players, *player_count, player_name)->in_game == -1) {
-                            send(client_sock, "Nie jesteś w grze!\n", 21, 0);
-                            continue;
-                        }
-                        if (index >= 1 && index <= 9) {
-                           int game_id = find_player_by_name(players, *player_count, player_name)->in_game;
-                           symbol = find_player_by_name(players, *player_count, player_name)->symbol;
+                        if(games[game_id].board[index - 1] != ' ') {
+                            send(client_sock, "To pole jest już zajęte!\n", 26, 0);
+                        } else if((games[game_id].turn % 2 == 0 && symbol == 'X') || 
+                                   (games[game_id].turn % 2 == 1 && symbol == 'O')) {
+                            games[game_id].board[index - 1] = symbol;
+                            games[game_id].turn++;
 
-                            if(games[game_id].board[index - 1] != ' ') {
-                                send(client_sock, "To pole jest już zajęte!\n", 26, 0);
-                            } else if((games[game_id].turn % 2 == 0 && symbol == 'X') || 
-                                       (games[game_id].turn % 2 == 1 && symbol == 'O')) {
-                                games[game_id].board[index - 1] = symbol;
-                                games[game_id].turn++;
+                            send_board(&games[game_id]);
+
+                            // tutaj check win/draw
+                            if (check_win_magic_square(games[game_id].board, symbol)) {
+                                char win_msg[BUFFER_SIZE];
+                                snprintf(win_msg, sizeof(win_msg), "Gratulacje %s! Wygrałeś!\n", player1_name);
+                                send(games[game_id].player1, win_msg, strlen(win_msg), 0);
                                 
-                                // Sformatuj planszę do stringa
-                                char board_msg[BUFFER_SIZE];
-                                snprintf(board_msg, sizeof(board_msg),
-                                    "%c|%c|%c\n- - -\n%c|%c|%c\n- - -\n%c|%c|%c\n",
-                                    games[game_id].board[0], games[game_id].board[1], games[game_id].board[2],
-                                    games[game_id].board[3], games[game_id].board[4], games[game_id].board[5],
-                                    games[game_id].board[6], games[game_id].board[7], games[game_id].board[8]
-                                );
-
-                                // tutaj check win/draw
-                                if (check_win_magic_square(games[game_id].board, symbol)) {
-                                    char win_msg[BUFFER_SIZE];
-                                    snprintf(win_msg, sizeof(win_msg), "Gratulacje %s! Wygrałeś!\n", player_name);
-                                    send(games[game_id].player1, win_msg, strlen(win_msg), 0);
-                                    games[game_id].finished = 1;
-                                    find_player_by_name(players, *player_count, player_name)->in_game = -1;
-                                    find_player_by_name(players, *player_count, player_name)->symbol = ' ';
-                                    find_player_by_name(players, *player_count, player_name)->score++;
-                                    update_score_in_file(player_name, 1);
-                                    clear_game(&games[game_id]);
-                                } else if (games[game_id].turn == 9) {
-                                    const char *draw_msg = "Remis!\n";
-                                    send(games[game_id].player1, draw_msg, strlen(draw_msg), 0);
-                                    games[game_id].finished = 1;
-                                    find_player_by_name(players, *player_count, player_name)->in_game = -1;
-                                    find_player_by_name(players, *player_count, player_name)->symbol = ' ';
-                                    find_player_by_name(players, *player_count, player_name)->score++;
-                                    clear_game(&games[game_id]);
+                                // Send lost message to the other player
+                                char lose_msg[BUFFER_SIZE] = "Przegrałeś!\n";
+                                if (symbol == 'X') {
+                                    send(games[game_id].player2, lose_msg, strlen(lose_msg), 0);
+                                } else {
+                                    send(games[game_id].player1, lose_msg, strlen(lose_msg), 0);
                                 }
-                                //nie wiem dla czego to wysyła dwa razy do jednego gracza
-                                //tutaj jeszcze zmienic tak zeby kasowalo dane z drugiego gracza
-
-                                send(games[game_id].player1, board_msg, strlen(board_msg), 0);
-                                //send(games[game_id].player2, board_msg, strlen(board_msg), 0);
-
-                           } else {
-                               send(client_sock, "Nie twoja kolej!\n", 17, 0);
-                               continue;
-                           }
-                           
-                        }else{
-                            send(client_sock, "Nieprawidłowy ruch. Wybierz pole od 1 do 9.\n", 44, 0);
-                            continue;
-                        }
-                    } else if(strncmp(buffer, "LIST", 4) == 0) {
-                        char player_list[BUFFER_SIZE] = "Aktywni gracze:\n";
-                        for (int i = 0; i < *player_count; i++) {
-                            strcat(player_list, players[i].name);
-                            char score_str[12];
-                            snprintf(score_str, sizeof(score_str), " %d", players[i].score);
-                            strcat(player_list, score_str);
-                            strcat(player_list, "\n");
-                        }
-                        send(client_sock, player_list, strlen(player_list), 0);
-                    } else if(sscanf(buffer, "CHALLENGE %31s %31s", player1_name, player2_name) == 2){
-                        int found = 0;
-                        printf("Wyzwanie od %s do %s\n", player1_name, player2_name);
-                        if(*player_count < 2) {
-                            send(client_sock, "Za mało graczy do rozpoczęcia gry.\n", 36, 0);
-                            continue;
-                        }
-
-                        if(strcmp(player1_name, player2_name) == 0) {
-                            send(client_sock, "Nie możesz wyzwać samego siebie.\n", 34, 0);
-                            continue;
-                        }
-
-
-                        int k,m;
-                        for (int i = 0; i < *player_count; i++) {
-                            if (strcmp(players[i].name, player1_name) == 0 && players[i].in_game == -1) {
-                                players[i].symbol = 'X';
-                                players[i].in_game = *game_count;
-                                games[*game_count].player1 = players[i].tcp_sockfd;
-                                k = i;
-                                found += 1;
-                            } else if (strcmp(players[i].name, player2_name) == 0 && players[i].in_game == -1) {
-                                players[i].symbol = 'O';
-                                players[i].in_game = *game_count;
-                                games[*game_count].player2 = players[i].tcp_sockfd;
-                                m = i;
-                                found += 1;
+                                
+                                games[game_id].finished = 1;
+                                
+                                find_player_by_name(players, *player_count, player_name)->in_game = -1;
+                                find_player_by_name(players, *player_count, player_name)->symbol = ' ';
+                                find_player_by_name(players, *player_count, player_name)->score++;
+                                update_score_in_file(player_name, 1);
+                                clear_game(&games[game_id]);
+                            } else if (games[game_id].turn == 9) {
+                                const char *draw_msg = "Remis!\n";
+                                send(games[game_id].player1, draw_msg, strlen(draw_msg), 0);
+                                games[game_id].finished = 1;
+                                
+                                find_player_by_name(players, *player_count, player_name)->in_game = -1;
+                                find_player_by_name(players, *player_count, player_name)->symbol = ' ';
+                                find_player_by_name(players, *player_count, player_name)->score++;
+                                clear_game(&games[game_id]);
                             }
-                        }
-                        if (found < 2) {
-                            send(client_sock, "Gracz nie znaleziony lub obecnie podczas rozgrywki.\n", 53, 0);
-                            clear_game(&games[*game_count]);
-                            players[k].in_game = -1;
-                            players[m].in_game = -1;
-                            players[k].symbol = ' ';
-                            players[m].symbol = ' ';
-                        } else {
-                            char start_msg[BUFFER_SIZE];
-                            snprintf(start_msg, sizeof(start_msg), "Rozpoczęto grę! Zaczyna gracz %s\n", player1_name);
-                            send(client_sock, start_msg, strlen(start_msg), 0);
-                            (*game_count)++;
-                        }
-                    }else if(strcmp(buffer, "SCORE") == 0){
-                        FILE *file = fopen("scores.txt", "r");
-                        char score_list[BUFFER_SIZE] = "Wyniki graczy:\n";
-                        char line[64];
-                        if (file) {
-                            while (fgets(line, sizeof(line), file)) {
-                                strcat(score_list, line);
-                            }
-                            fclose(file);
-                        } else {
-                            strcat(score_list, "Brak wyników.\n");
-                        }
-                        send(client_sock, score_list, strlen(score_list), 0);
-                    } 
-                    else {
-                        send(client_sock, "Nieznana komenda. Dostępne komendy to: MOVE <pole>, LIST, CHALLENGE <gracz>\n", 64, 0);
+                       } else {
+                           send(client_sock, "Nie twoja kolej!\n", 17, 0);
+                           continue;
+                       }
+                       
+                    }else{
+                        send(client_sock, "Nieprawidłowy ruch. Wybierz pole od 1 do 9.\n", 44, 0);
+                        continue;
                     }
+                } else if(strncmp(buffer, "LIST", 4) == 0) {
+                    char player_list[BUFFER_SIZE] = "Aktywni gracze:\n";
+                    for (int j = 0; j < *player_count; j++) {
+                        strcat(player_list, players[j].name);
+                        char score_str[12];
+                        snprintf(score_str, sizeof(score_str), " %d", players[j].score);
+                        strcat(player_list, score_str);
+                        strcat(player_list, "\n");
+                    }
+                    send(client_sock, player_list, strlen(player_list), 0);
+                } else if(sscanf(buffer, "CHALLENGE %31s %31s", player1_name, player2_name) == 2){
+                    int found = 0;
+                    syslog(LOG_INFO, "Wyzwanie od %s do %s\n", player1_name, player2_name);
+                    if(*player_count < 2) {
+                        send(client_sock, "Za mało graczy do rozpoczęcia gry.\n", 36, 0);
+                        continue;
+                    }
+
+                    if(strcmp(player1_name, player2_name) == 0) {
+                        send(client_sock, "Nie możesz wyzwać samego siebie.\n", 34, 0);
+                        continue;
+                    }
+
+                    int k = -1, m = -1;
+                    for (int j = 0; j < *player_count; j++) {
+                        if (strcmp(players[j].name, player1_name) == 0 && players[j].in_game == -1) {
+                            players[j].symbol = 'X';
+                            players[j].in_game = *game_count;
+                            games[*game_count].player1 = players[j].tcp_sockfd;
+                            k = j;
+                            found += 1;
+                        } else if (strcmp(players[j].name, player2_name) == 0 && players[j].in_game == -1) {
+                            players[j].symbol = 'O';
+                            players[j].in_game = *game_count;
+                            games[*game_count].player2 = players[j].tcp_sockfd;
+                            m = j;
+                            found += 1;
+                        }
+                    }
+                    if (found < 2) {
+                        send(client_sock, "Gracz nie znaleziony lub obecnie podczas rozgrywki.\n", 53, 0);
+                        if (k != -1) { players[k].in_game = -1; players[k].symbol = ' '; }
+                        if (m != -1) { players[m].in_game = -1; players[m].symbol = ' '; }
+                        clear_game(&games[*game_count]);
+                    } else {
+                        char start_msg[BUFFER_SIZE];
+                        snprintf(start_msg, sizeof(start_msg), "Rozpoczęto grę! Zaczyna gracz %s\n", player1_name);
+                        send(client_sock, start_msg, strlen(start_msg), 0);
+                        
+                        // Alert the challenged player
+                        char alert_msg[BUFFER_SIZE];
+                        snprintf(alert_msg, sizeof(alert_msg), "Otrzymałeś wyzwanie od %s! ZACZYNASZ\n", player2_name);
+                        send(games[*game_count].player1, alert_msg, strlen(alert_msg), 0);
+
+                        send_board(&games[*game_count]);
+                        
+                        (*game_count)++;
+                    }
+                }else if(strcmp(buffer, "SCORE") == 0){
+                    FILE *file = fopen("scores.txt", "r");
+                    char score_list[BUFFER_SIZE] = "Wyniki graczy:\n";
+                    char line[64];
+                    if (file) {
+                        while (fgets(line, sizeof(line), file)) {
+                            strcat(score_list, line);
+                        }
+                        fclose(file);
+                    } else {
+                        strcat(score_list, "Brak wyników.\n");
+                    }
+                    send(client_sock, score_list, strlen(score_list), 0);
+                } 
+                else {
+                    send(client_sock, "Nieznana komenda. Dostępne komendy to: MOVE <pole>, LIST, CHALLENGE <gracz>\n", 64, 0);
                 }
-
-                close(client_sock);
-                exit(0);
             }
-
-            // Proces macierzysty
-            close(client_sock);
         }
     }
 
     close(udp_sock);
     close(tcp_sock);
+    for (int i = 0; i < FD_SETSIZE; i++) {
+        if (client_socks[i] != -1) close(client_socks[i]);
+    }
     return 0;
 }
